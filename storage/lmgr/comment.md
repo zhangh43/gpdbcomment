@@ -22,3 +22,24 @@ Lightweight locks can be a little more problematic.  If you see a process that's
 
 lw When transaction abort auto release
 codes holding spin lock should not elog error.
+
+
+4. Describe the usage of different lock mode
+./src/include/storage/lock.h
+```
+/* NoLock is not a lock mode, but a flag value meaning "don't get a lock" */
+#define NoLock                  0
+
+#define AccessShareLock         1       /* SELECT */
+#define RowShareLock            2       /* SELECT FOR UPDATE/FOR SHARE */
+#define RowExclusiveLock        3       /* INSERT, UPDATE, DELETE */
+#define ShareUpdateExclusiveLock 4      /* VACUUM (non-FULL),ANALYZE, CREATE
+                                         * INDEX CONCURRENTLY */
+#define ShareLock               5       /* CREATE INDEX (WITHOUT CONCURRENTLY) */
+#define ShareRowExclusiveLock   6       /* like EXCLUSIVE MODE, but allows ROW
+                                         * SHARE */
+#define ExclusiveLock           7       /* blocks ROW SHARE/SELECT...FOR
+                                         * UPDATE */
+#define AccessExclusiveLock     8       /* ALTER TABLE, DROP TABLE, VACUUM
+                                         * FULL, and unqualified LOCK TABLE */
+```
