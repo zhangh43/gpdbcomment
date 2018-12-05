@@ -43,3 +43,14 @@ codes holding spin lock should not elog error.
 #define AccessExclusiveLock     8       /* ALTER TABLE, DROP TABLE, VACUUM
                                          * FULL, and unqualified LOCK TABLE */
 ```
+
+
+5 Lock conflict table?
+
+
+6 why use session level lock?
+ref index_drop. using two transactions to do index drop
+Step1:??
+Step2:??
+
+
