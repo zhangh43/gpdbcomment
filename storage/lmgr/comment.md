@@ -46,11 +46,27 @@ codes holding spin lock should not elog error.
 
 
 5 Lock conflict table?
+https://www.postgresql.org/docs/current/explicit-locking.html
 
 
 6 why use session level lock?
 ref index_drop. using two transactions to do index drop
 Step1:??
 Step2:??
+
+/*
+ *		LockRelationIdForSession
+ *
+ * This routine grabs a session-level lock on the target relation.  The
+ * session lock persists across transaction boundaries.  It will be removed
+ * when UnlockRelationIdForSession() is called, or if an ereport(ERROR) occurs,
+ * or if the backend exits.
+ *
+ * Note that one should also grab a transaction-level lock on the rel
+ * in any transaction that actually uses the rel, to ensure that the
+ * relcache entry is up to date.
+ */
+void
+LockRelationIdForSession(LockRelId *relid, LOCKMODE lockmode)
 
 
