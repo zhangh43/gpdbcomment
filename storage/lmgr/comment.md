@@ -70,3 +70,15 @@ void
 LockRelationIdForSession(LockRelId *relid, LOCKMODE lockmode)
 
 
+7 How to implement deadlock detector?
+Using timeout mechenism. 
+RegisterTimeout(DEADLOCK_TIMEOUT, CheckDeadLockAlert); 
+Details in timeout.c
+
+8 What lockgroup?
+
+9 What is ProcLock?
+
+10 How to store the lock held info, wait info.
+
+
