@@ -53,6 +53,7 @@ https://www.postgresql.org/docs/current/explicit-locking.html
 ref index_drop. using two transactions to do index drop
 Step1:??
 Step2:??
+Case??
 
 /*
  *		LockRelationIdForSession
@@ -77,7 +78,7 @@ Details in timeout.c
 
 8 What lockgroup?
 
-9 What is ProcLock?
+
 
 10 How to store the lock held info, wait info.
 
@@ -230,3 +231,72 @@ typedef struct LOCK
 } LOCK;
 ```
 
+19 What is struct PROCLOCKTAG?
+It's just the combinination of Lock and PGPROC pair.
+```
+typedef struct PROCLOCKTAG
+{
+	/* NB: we assume this struct contains no padding! */
+	LOCK	   *myLock;			/* link to per-lockable-object information */
+	PGPROC	   *myProc;			/* link to PGPROC of owning backend */
+} PROCLOCKTAG;
+```
+
+19 What is ProcLock?
+Stored in shared memory hash table LockMethodProcLockHash.
+It describe the lock info of <LOCK,PGPROC> pair, which includes the holdlockmask, releaselockmask. It also contains links to LOCK and PRPROC struct. Field groupLeader is a pointer to leader process. Postgres choose to regard locks held by processes in the same parallel group as non-conflicting.
+Life Cycle:
+created when
+deleted when 
+
+```
+typedef struct PROCLOCK
+{
+	/* tag */
+	PROCLOCKTAG tag;			/* unique identifier of proclock object */
+
+	/* data */
+	PGPROC	   *groupLeader;	/* proc's lock group leader, or proc itself */
+	LOCKMASK	holdMask;		/* bitmask for lock types currently held */
+	LOCKMASK	releaseMask;	/* bitmask for lock types to be released */
+	SHM_QUEUE	lockLink;		/* list link in LOCK's list of proclocks */
+	SHM_QUEUE	procLink;		/* list link in PGPROC's list of proclocks */
+} PROCLOCK;
+```
+
+19 What is struct LOCALLOCKTAG?
+It's just the combinination of Lock and mode pair.
+Adding mode into LOCALLOCKTAG is used to search the local lock hash table quickly. Because our parameter of LockAcquire is that
+```
+LockAcquire(const LOCKTAG *locktag, LOCKMODE lockmode,...)
+```
+LOCALLOCKTAG is as follows:
+```
+typedef struct LOCALLOCKTAG
+{
+	LOCKTAG		lock;			/* identifies the lockable object */
+	LOCKMODE	mode;			/* lock mode for this table entry */
+} LOCALLOCKTAG;
+```
+
+19 what is LOCALLOCK
+LOCALLOCK allows multiple requests for the same lock to be executed without additional accesses to shared memory.
+```
+typedef struct LOCALLOCK
+{
+	/* tag */
+	LOCALLOCKTAG tag;			/* unique identifier of locallock entry */
+
+	/* data */
+	LOCK	   *lock;			/* associated LOCK object, if any */
+	PROCLOCK   *proclock;		/* associated PROCLOCK object, if any */
+	uint32		hashcode;		/* copy of LOCKTAG's hash value */
+	int64		nLocks;			/* total number of times lock is held */
+	bool		holdsStrongLockCount;	/* bumped FastPathStrongRelationLocks */
+	bool		lockCleared;	/* we read all sinval msgs for lock */
+	int			numLockOwners;	/* # of relevant ResourceOwners */
+	int		
+	maxLockOwners;	/* allocated size of array */
+	LOCALLOCKOWNER *lockOwners; /* dynamically resizable array */
+} LOCALLOCK;
+```
