@@ -81,4 +81,152 @@ Details in timeout.c
 
 10 How to store the lock held info, wait info.
 
+11 What is struct LockTag?
+It describe the lockable object, could be a relation, tuple, page etc.
+```
+typedef enum LockTagType
+{
+	LOCKTAG_RELATION,			/* whole relation */
+	/* ID info for a relation is DB OID + REL OID; DB OID = 0 if shared */
+	LOCKTAG_RELATION_EXTEND,	/* the right to extend a relation */
+	/* same ID info as RELATION */
+	LOCKTAG_PAGE,				/* one page of a relation */
+	/* ID info for a page is RELATION info + BlockNumber */
+	LOCKTAG_TUPLE,				/* one physical tuple */
+	/* ID info for a tuple is PAGE info + OffsetNumber */
+	LOCKTAG_TRANSACTION,		/* transaction (for waiting for xact done) */
+	/* ID info for a transaction is its TransactionId */
+	LOCKTAG_VIRTUALTRANSACTION, /* virtual transaction (ditto) */
+	/* ID info for a virtual transaction is its VirtualTransactionId */
+	LOCKTAG_SPECULATIVE_TOKEN,	/* speculative insertion Xid and token */
+	/* ID info for a transaction is its TransactionId */
+	LOCKTAG_OBJECT,				/* non-relation database object */
+	/* ID info for an object is DB OID + CLASS OID + OBJECT OID + SUBID */
+
+	/*
+	 * Note: object ID has same representation as in pg_depend and
+	 * pg_description, but notice that we are constraining SUBID to 16 bits.
+	 * Also, we use DB OID = 0 for shared objects such as tablespaces.
+	 */
+	LOCKTAG_USERLOCK,			/* reserved for old contrib/userlock code */
+	LOCKTAG_ADVISORY			/* advisory user locks */
+} LockTagType;
+```
+12 what is LockMethodData
+LockMethodData could be considered as a deescription of a lock method/system. How many locks it supported and the conflict map between these locks. 
+```
+typedef struct LockMethodData
+{
+	int			numLockModes;
+	const LOCKMASK *conflictTab;
+	const char *const *lockModeNames;
+	const bool *trace_flag;
+} LockMethodData;
+```
+There are two LockMethodData in Postgres. 
+```
+/* These identify the known lock methods */
+#define DEFAULT_LOCKMETHOD	1
+#define USER_LOCKMETHOD		2
+```
+Take default lockmethod as example.
+```
+const LockMethodData default_lockmethod = {
+	AccessExclusiveLock,		/* highest valid lock mode number */
+	LockConflicts,
+	lock_mode_names,
+#ifdef LOCK_DEBUG
+	&Trace_locks
+#else
+	&Dummy_trace
+#endif
+};
+```
+LockConflicts is an int array, record the conflict map
+```
+static const LOCKMASK LockConflicts[] = {
+	0,
+
+	/* AccessShareLock */
+	(1 << AccessExclusiveLock),
+
+	/* RowShareLock */
+	(1 << ExclusiveLock) | (1 << AccessExclusiveLock),
+
+	/* RowExclusiveLock */
+	(1 << ShareLock) | (1 << ShareRowExclusiveLock) |
+	(1 << ExclusiveLock) | (1 << AccessExclusiveLock),
+
+	/* ShareUpdateExclusiveLock */
+	(1 << ShareUpdateExclusiveLock) |
+	(1 << ShareLock) | (1 << ShareRowExclusiveLock) |
+	(1 << ExclusiveLock) | (1 << AccessExclusiveLock),
+
+	/* ShareLock */
+	(1 << RowExclusiveLock) | (1 << ShareUpdateExclusiveLock) |
+	(1 << ShareRowExclusiveLock) |
+	(1 << ExclusiveLock) | (1 << AccessExclusiveLock),
+
+	/* ShareRowExclusiveLock */
+	(1 << RowExclusiveLock) | (1 << ShareUpdateExclusiveLock) |
+	(1 << ShareLock) | (1 << ShareRowExclusiveLock) |
+	(1 << ExclusiveLock) | (1 << AccessExclusiveLock),
+
+	/* ExclusiveLock */
+	(1 << RowShareLock) |
+	(1 << RowExclusiveLock) | (1 << ShareUpdateExclusiveLock) |
+	(1 << ShareLock) | (1 << ShareRowExclusiveLock) |
+	(1 << ExclusiveLock) | (1 << AccessExclusiveLock),
+
+	/* AccessExclusiveLock */
+	(1 << AccessShareLock) | (1 << RowShareLock) |
+	(1 << RowExclusiveLock) | (1 << ShareUpdateExclusiveLock) |
+	(1 << ShareLock) | (1 << ShareRowExclusiveLock) |
+	(1 << ExclusiveLock) | (1 << AccessExclusiveLock)
+
+};
+```
+lock_mode_names is just the name of eight locks
+```
+/* Names of lock modes, for debug printouts */
+static const char *const lock_mode_names[] =
+{
+	"INVALID",
+	"AccessShareLock",
+	"RowShareLock",
+	"RowExclusiveLock",
+	"ShareUpdateExclusiveLock",
+	"ShareLock",
+	"ShareRowExclusiveLock",
+	"ExclusiveLock",
+	"AccessExclusiveLock"
+};
+```
+
+13 what is struct LOCK
+struct LOCK is the item in Shared memory hash table LockMethodLockHash;
+Key is lockable object, value includes 
+grantMask: record the lock type which already be granted. E.g. for a table ta, the AccessShareLock and RowShareLock may already be granted/held. This is used to check whether new AcquireLock request is allowed or not. Since AccessShareLock and RowShareLock are held, ExclusiveLock and AccessExclusiveLock will be denied.
+waitMask: record the conflict lock type which is waiting to be allowed. If AcquireLock failed, the lock type will be written into waitMask
+procLocks: PROCLOCK list contains backends, which are holding lock on this lockable object
+waitProcs：PGPROC list contains backends which are waiting lock on this lockable object.
+requested: request times for each lock type.
+granted: grant times for each lock type.
+```
+typedef struct LOCK
+{
+	/* hash key */
+	LOCKTAG		tag;			/* unique identifier of lockable object */
+
+	/* data */
+	LOCKMASK	grantMask;		/* bitmask for lock types already granted */
+	LOCKMASK	waitMask;		/* bitmask for lock types awaited */
+	SHM_QUEUE	procLocks;		/* list of PROCLOCK objects assoc. with lock */
+	PROC_QUEUE	waitProcs;		/* list of PGPROC objects waiting on lock */
+	int			requested[MAX_LOCKMODES];	/* counts of requested locks */
+	int			nRequested;		/* total of requested[] array */
+	int			granted[MAX_LOCKMODES]; /* counts of granted locks */
+	int			nGranted;		/* total of granted[] array */
+} LOCK;
+```
 
