@@ -171,3 +171,81 @@ typedef struct FileSegInfo
 
 什么是varblock
 Heap表中block／page
+
+
+typedef struct BufferedAppend
+{
+	/*
+	 * Init level.
+	 */
+	char				*relationName;
+
+	/*
+	 * Large-write memory level members.
+	 */
+    int32      			 maxBufferLen;
+    int32      			 maxLargeWriteLen;
+
+	uint8                *memory;
+    int32                memoryLen;
+
+    uint8                *largeWriteMemory;
+
+    uint8                *afterBufferMemory;
+							/*
+							 * We allocate maxBufferLen bytes after largeWriteMemory
+							 * to support buffers that cross large write boundaries.
+							 */
+	
+	int64				 largeWritePosition;
+    int32                largeWriteLen;
+							/*
+							 * The position within the current file for the next write
+							 * and the number of bytes buffered up in largeWriteMemory
+							 * for the next write.
+							 *
+							 * NOTE: The currently allocated buffer (see bufferLen)
+							 * may spill across into afterBufferMemory.
+							 */
+	
+	/*
+	 * Buffer level members.
+	 */	
+    int32                bufferLen;
+							/*
+							 * The buffer within largeWriteMemory given to the caller to
+							 * fill in.  It starts after largeWriteLen bytes (i.e. the
+							 * offset) and is bufferLen bytes long.
+							 */
+
+	/*
+	 * File level members.
+	 */
+	File 				 file;
+	RelFileNodeBackend	relFileNode;
+	int32				segmentFileNum;
+    char				 *filePathName;
+    int64                fileLen;
+    int64				 fileLen_uncompressed; /* for calculating compress ratio */
+
+} BufferedAppend;
+
+这个结构体负责高效将内存buffer写入AO的segfile文件。largeWriteMemory是需要落盘的memory地址， largeWriteLen是需要落盘的长度。
+largeWritePosition 记录文件的当前有效位置（offset）。 
+
+AO table 首先写入varblock， 写满之后调用AppendOnlyStorageWrite_Content
+
+AO表文件结构，
+AO表Scan：
+1. SeqScan
+2. BitmapScan  
+AO表Insert
+AO表的insert是append模式，只能从eof开始不对追加数据。因此，无法处理多个tx并发insert同一个文件。GPDB的处理方式是提前为每一个tx分配关联的
+segfileno，不同的tx插入不同的segfile。具体来说ExectorStart的InitPlan阶段QD调用assignPerRelSegno获取每一个result relation当前可用的segfileno；QE从QD获取segfileno。
+segfileno，不同的tx插入不同的segfile。具体来说ExectorStart的InitPlan阶段QD调用assignPerRelSegno获取每一个result relation当前可用的segfileno；QE从QD获取segfileno。
+Insert初始化阶段，主要是准备AppendOnlyInsertDescData结构体，包括：设置待插入的segfileno，是否使用toast，从appendonly系统表读取blocksize，storage
+属性信息（压缩类型，压缩等级，checksum，safeFSWriteSize，overflowSize；补充解释后面两个属性：safeFSWriteSize是在不成熟的文件系统上，根据其最小的安全写入大小（避免数据损坏），在gpdb会做额外的padding处理. overflowSize是指压缩算法在针对某些数据时，压缩后的大小甚至会超过数据原始大小，超过的原数据大小的部分就是overflowSize，比如GPDB的quicklz算法的overflowSize是400bytes）初始化AppendOnlyStorageWrite结构体，它
+
+AO表Update+Delete
+
+
