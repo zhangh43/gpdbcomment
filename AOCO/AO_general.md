@@ -1,7 +1,51 @@
-#AO Insert流程
+# AO Insert流程
 
 1. 初始化阶段
 
+读取append_only表，获取压缩（算法，等级），checksum，blocksize等信息
+设置各种Buffer和长度信息，包括： overflowSize（压缩后可能增加的最大长度） 完整header长度（2个checksum+fisrtrownum+header—size），最大数据长度
+填充storageWrite和BufferedWrite结构体，特别是初始化BufferedWrite的memory buffer
+设置varblock的tempspace
+设置toast阈值
+加锁文件
+如果不存在则创建新文件
+打开文件
+读取pg_aoseg.pg_aoseg_oid系统表，获取文件eof，varblock数量，tuple数量等信息。
+（获取序列号）
+准备一个新的varblock，供写入tuple
+初始化索引blockdirectory
+
 2. 插入tuple阶段
 
+AO表插入时的输入参数有两个一个是tuple本身，一个是tupleoid。
+Tuple本身是个memtuple，即tuple数据直接读取／写入磁盘。
+tupleoid只针对has_oid类型的表。
+开始插入时，首先判断是否需要进行toast处理，这里有两类条件，一个由GUCdebug_appendonly_use_no_toast控制useNoToast flag，一个由toast的阈值控制+是否包含Exernal属性决定，如果tuple大小超过toast阈值或者存在External属性，则进行toast处理。
+AO的toast处理逻辑与Heap表没有本质区别，唯一不同是使用Memtuple作为toast处理对象。
+如果表是has_oid类型，需要额外为其设置tupleoid。
+之后进入插入的常规逻辑。首先根据tuple大小，尝试直接将buffer写入Varblock。以下两种条件会写入失败：1.当前Varblock的tuple数超过AOSmallContentHeader_MaxRowCount，2. 当前Varblock剩余的长度小于tuple的大小。对于上述情况会首先关闭当前非空varblock，并打开一个新的Varblock继续尝试写入，如果仍然失败则检查useNoToast flag，如果开启那么进入LargeContent写入模式，否则报错（应该使用toast处理超过一个varblock大小的数据）
+LargeContent是一个tuple对应多个varblock的写入模式，首先生成LargeContentHeader，并输入buffer；之后开始smallcontent+data方式，不断将数据添加到一个个varblock中并写入磁盘。写入完毕打开一个新的varblock供接下来的tuple使用。我们可以看到一个Largecontent的数据插入最后修改tuple数等统计信息，并检查更新Sequence，设置aotupleid
 3. 插入结束阶段
+
+aoInsertDesc->usableBlockSize：ao blocksize
+aoInsertDesc->completeHeaderLen：ao header长度，包括两个checksum，firstrow等信息
+aoInsertDesc->maxDataLen: 一个aoblock的最大数据长度，aoInsertDesc->usableBlockSize -aoInsertDesc->completeHeaderLen;
+
+storageWrite->maxBufferLen: ao blocksize
+storageWrite->largeWriteLen(maxLargeWriteLen) = 2倍ao blocksize；2 * storageWrite->maxBufferLen
+storageWrite->regularHeaderLen：不包括可能的AoHeader_LongSize 和 firstrow的header长度
+storageWrite->logicalBlockStartOffset: 用于blockdirectory索引，当前数据写入后在文件中的偏移量，等于bufferedAppend->largeWritePosition+bufferedAppend->largeWriteLen， 即已经写入文件的位置，将内存中尚需写入的位置。
+storageWrite->currentCompleteHeaderLen: 当前header完整长度
+storageWrite->currentBuffer：指向当前bufferedAppend->largeWriteMemory
+storageWrite->compressionOverrunLen:压缩算法引入的额外空间开销
+storageWrite->maxBufferWithCompressionOverrrunLen：ao blocksize+ 压缩算法引入的开销。
+
+bufferedAppend->bufferLen：记录当前buffer通过BufferedAppendGetBuffer获取的可供修改的数据长度。
+bufferedAppend->largeWritePosition：写入文件时的文件偏移位置。一开始时eof，而后随着写入不断向后增长。
+bufferedAppend->largeWriteLen当前buffer已经写入的数据长度，如果超过maxLargeWriteLen则将buffer largeWriteMemory写入磁盘.
+bufferedAppend->largeWriteMemory:  待写入磁盘的buffer数据起点的指针，就是memory的位置
+bufferedAppend->afterBufferMemory：从memory位置开始，bufferedAppend->maxLargeWriteLen之后的buffer指针。
+bufferedAppend->maxBufferLen(maxBufferWithCompressionOverrrunLen)：包括压缩后产生oversize的最大可能buffer长度 is storageWrite->maxBufferWithCompressionOverrrunLen
+bufferedAppend->maxLargeWriteLen: storageWrite->largeWriteLen = 2* blocksize
+bufferedAppend->memoryLen:storageWrite->largeWriteLen+storageWrite->maxBufferWithCompressionOverrrunLen
+bufferedAppend->memory: palloc, 没有显示释放，随上层memorycontext
