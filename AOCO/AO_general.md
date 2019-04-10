@@ -55,8 +55,9 @@ bufferedAppend->memory: palloc, 没有显示释放，随上层memorycontext
 
 # Update and delete
 1.AO表的delete通过visimap实现，而update是由delete+insert实现。因此visimap是理解AO表的关键。
+
 visimap是
-与存储AO表eof信息的辅助heap表“pg_aoseg.pg_aoseg_<oid>”类似，visimap也被定义为一张辅助heap表“pg_aoseg.pg_aovisimap_<oid>”，它的结构如下：
+与存储AO表eof信息的辅助heap表“pg_aoseg.pg_aoseg_<oid>”类似，visimap也被定义为一张辅助heap表“pg_aoseg.pg_aovisimap_<oid>”，它的catalog结构如下：
 ```
 postgres=# create table a(i int) with (appendonly='true', orientation='row');
 postgres=# insert into a select generate_series(1,1000);
@@ -72,8 +73,35 @@ postgres=# select gp_segment_id,* from gp_dist_random('pg_aoseg.pg_aovisimap_248
 ```
 
 visimap的接口主要包括：
-1. AppendOnlyVisimap_IsVisible： 判断一个AOTupleId是否可见
-2. AppendOnlyVisimapDelete_Hide： 将一个AOTupleId隐藏，等效于删除操作
+1. AppendOnlyVisimap_IsVisible： 判断一个AOTupleId是否可见, 主要用于AO表的scan（seq scan／bitmapAppendonlyscan），vacuum（压缩）操作
+2. AppendOnlyVisimapDelete_Hide： 将一个AOTupleId隐藏，等效于删除操作，主要用于AO表的update，delete操作
 3. AppendOnlyVisimap_GetSegmentFileHiddenTupleCount： 获取segfile的隐藏tuple数，用于在vacuum时判断是否需要压缩segfile。对于full vacuum只要
 存在隐藏tuple，就进行压缩。对于vacuum操作，基于GUC gp_appendonly_compaction_threshold（默认值10%）决定是否进行压缩。
+
+visimap的内部结构：
+AppendOnlyVisimapEntry是一个visimap的最小单位，它用一个bitmap来表示tuple的可见性。AppendOnlyVisimapEntry通过属性segmentFileNum和
+firstRowNum来定位bitmap的起始边界，基于起始边界我们可以快速确定一个AOtuple是否包含在当前AppendOnlyVisimapEntry中。
+边界长度信息：未压缩的bitmap的最大size是4KB，最大tuple数是32768, 具体由以下宏来定义。
+```
+#define APPENDONLY_VISIMAP_MAX_RANGE 32768
+#define APPENDONLY_VISIMAP_MAX_BITMAP_SIZE 4096
+```
+
+下面结合一个具体操作说明AppendOnlyVisimapEntry的作用
+当判断一个tuple可见行的时候，实际上由两个步骤组成，第一步定位包含该tuple的bitmap（AppendOnlyVisimapEntry），第二步检查bitmap。
+
+对于第一步，基于起始边界和边界长度，可以快速确定当前AppendOnlyVisimapEntry是否包含tuple，如果不包含，则需要额外替换和寻找目标AppendOnlyVisimapEntry。替换步骤需要将当前已修改（AppendOnlyVisimapEntry的dirty属性标识是否已修改）的AppendOnlyVisimapEntry落盘。落盘操作即将bitmap压缩并将当前AppendOnlyVisimapEntry形成tuple写入“pg_aoseg.pg_aovisimap_<oid>”heap表。寻找目标AppendOnlyVisimapEntry步骤主要是对“pg_aoseg.pg_aovisimap_<oid>”heap表进行indexscan，索引key就是segmentFileNum和firstRowNum。如果没有查找到，就初始化当前AppendOnlyVisimapEntry并将当前tuple作为该entry第一个tuple。
+
+对于第二步，O（1）时间的bitmap位比较，这里还有个优化，如果bitmap为空，则之间返回tuple可见。
+
+AppendOnlyVisimapDelete是支持AO表删除操作的辅助结构。它包括一个dirtyEntryCache和workfile。
+下面结合一个具体操作说明AppendOnlyVisimapDelete的作用
+AppendOnlyVisimapDelete是支持AO表删除操作的辅助结构。它包括属性dirtyEntryCache和workfile。
+当删除（隐藏）一个tuple的时候，同样由两个步骤组成，第一步定位包含待删除tuple的AppendOnlyVisimapEntry，第二步置位AppendOnlyVisimapEntry的bitmap。
+对于第一步看似和判断tuple可见性类似，但由于scan是只读操作，不会产生脏的AppendOnlyVisimapEntry需要落盘，因此定位的代价主要是对“pg_aoseg.pg_aovisimap_<oid>”heap表的indexscan。相反delete操作会产生大量的脏AppendOnlyVisimapEntry，而且批量数据的delete并不连续，会不断切换
+AppendOnlyVisimapEntry， 如果每次切换都落盘性能会非常差。因此删除tuple时的定位操作使用了dirtyEntryCache和workfile相结合方式。当AppendOnlyVisimapEntry需要切换的时候，会首先将当前entry的原数据信息（workFileOffset，segmentFileNum和firstRowNum ）存入dirtyEntryCache，entry的bitmap信息压缩后存入workfile。在查找的时候，首先基于dirtyEntryCache查找，查找不到才通过“pg_aoseg.pg_aovisimap_<oid>”heap表索引查找。
+
+对于第二步，同样O（1）时间的bitmap置位，但这里有三种情况。情况1是bitmap之前未置位，执行置位操作并返回HeapTupleMayBeUpdated。情况2bitmap已经置位且标记为脏，说明当前tx删除了该tuple，返回HeapTupleSelfUpdated；情况3bitmap已经置位且标记不为脏，有其他tx删除了该tuple，返回HeapTupleUpdated。最后无论哪种情况，都将该entry标记为脏。
+
+AppendOnlyVisimapEntry， 
 
