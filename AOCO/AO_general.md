@@ -49,3 +49,31 @@ bufferedAppend->maxBufferLen(maxBufferWithCompressionOverrrunLen)：包括压缩
 bufferedAppend->maxLargeWriteLen: storageWrite->largeWriteLen = 2* blocksize
 bufferedAppend->memoryLen:storageWrite->largeWriteLen+storageWrite->maxBufferWithCompressionOverrrunLen
 bufferedAppend->memory: palloc, 没有显示释放，随上层memorycontext
+
+
+
+
+# Update and delete
+1.AO表的delete通过visimap实现，而update是由delete+insert实现。因此visimap是理解AO表的关键。
+visimap是
+与存储AO表eof信息的辅助heap表“pg_aoseg.pg_aoseg_<oid>”类似，visimap也被定义为一张辅助heap表“pg_aoseg.pg_aovisimap_<oid>”，它的结构如下：
+```
+postgres=# create table a(i int) with (appendonly='true', orientation='row');
+postgres=# insert into a select generate_series(1,1000);
+postgres=# delete from a where i<=40;
+DELETE 38
+postgres=# select gp_segment_id,* from gp_dist_random('pg_aoseg.pg_aovisimap_248926');
+ gp_segment_id | segno | first_row_no |        visimap
+---------------+-------+--------------+------------------------
+             1 |     1 |            0 | \x010000000001fe1f0000
+             0 |     1 |            0 | \x010000000001feff0000
+             2 |     1 |            0 | \x010000000001fe3f0000
+(3 rows)
+```
+
+visimap的接口主要包括：
+1. AppendOnlyVisimap_IsVisible： 判断一个AOTupleId是否可见
+2. AppendOnlyVisimapDelete_Hide： 将一个AOTupleId隐藏，等效于删除操作
+3. AppendOnlyVisimap_GetSegmentFileHiddenTupleCount： 获取segfile的隐藏tuple数，用于在vacuum时判断是否需要压缩segfile。对于full vacuum只要
+存在隐藏tuple，就进行压缩。对于vacuum操作，基于GUC gp_appendonly_compaction_threshold（默认值10%）决定是否进行压缩。
+
