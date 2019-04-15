@@ -1,5 +1,9 @@
-Welcome to the greenplum diskquota Wiki!
-This Wiki page includes the latest explanation of greenplum diskquota design
+# Greenplum 6.0 新功能介绍——磁盘配额管理工具diskquota
+Diskquota是Greenplum6.0提供的磁盘配额管理工具。
+Greenplum Diskquota is an extension to control the disk usage for database objects like schemas or roles. DBA could set the quota limit for a schema or a role on a database. Then diskquota worker process will monitor disk usage and maintain the diskquota model, which includes the current disk usage of each schema or role in the database and the blacklist of schema and role whose quota limit is reached. Loading data into tables, whose schema or role is in diskquota blacklist, will be cancelled.
+
+Currently, Diskquota only supports soft limit of disk usage. On one hand it has some delay to detect the schemas or roles whose quota limit is exceeded. The delay also exists when you drop/truncate/vacuum full a table(delay could be adjusted by GUC `diskquota.naptime`). On the other hand, 'soft limit' is a kind of 'before running' enforcement: Query loading data into out-of-quota schema/role will be forbidden before query is running. It could not cancel the query whose quota limit is reached dynamically during the query is running. DBA could use show_fast_schema_quota_view and show_fast_role_quota_view to check which schema/role is out of limit and decide to grant more quota to that schema/role or not.
+
 
 * [Postgresql Diskquota](#postgresql-diskquota)
 * [What Is Diskquota](#what-is-diskquota)
@@ -18,9 +22,7 @@ Greenplum diskquota follows the most of design of postgresql diskquota. At the s
 2. Support AO/CO format tables.
 
 # What Is Diskquota
-Greenplum Diskquota is an extension to control the disk usage for database objects like schemas or roles. DBA could set the quota limit for a schema or a role on a database. Then diskquota worker process will monitor disk usage and maintain the diskquota model, which includes the current disk usage of each schema or role in the database and the blacklist of schema and role whose quota limit is reached. Loading data into tables, whose schema or role is in diskquota blacklist, will be cancelled.
 
-Currently, Diskquota only supports soft limit of disk usage. On one hand it has some delay to detect the schemas or roles whose quota limit is exceeded. The delay also exists when you drop/truncate/vacuum full a table(delay could be adjusted by GUC `diskquota.naptime`). On the other hand, 'soft limit' is a kind of 'before running' enforcement: Query loading data into out-of-quota schema/role will be forbidden before query is running. It could not cancel the query whose quota limit is reached dynamically during the query is running. DBA could use show_fast_schema_quota_view and show_fast_role_quota_view to check which schema/role is out of limit and decide to grant more quota to that schema/role or not.
 
 # Design Of Diskquota
 To implement diskquota feature, we split the functionality into four parts.
