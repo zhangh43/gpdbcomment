@@ -1,30 +1,29 @@
 # Greenplum 6.0 新功能介绍——磁盘配额管理工具diskquota
-Diskquota是Greenplum6.0提供的磁盘配额管理工具。
-Greenplum Diskquota is an extension to control the disk usage for database objects like schemas or roles. DBA could set the quota limit for a schema or a role on a database. Then diskquota worker process will monitor disk usage and maintain the diskquota model, which includes the current disk usage of each schema or role in the database and the blacklist of schema and role whose quota limit is reached. Loading data into tables, whose schema or role is in diskquota blacklist, will be cancelled.
 
-Currently, Diskquota only supports soft limit of disk usage. On one hand it has some delay to detect the schemas or roles whose quota limit is exceeded. The delay also exists when you drop/truncate/vacuum full a table(delay could be adjusted by GUC `diskquota.naptime`). On the other hand, 'soft limit' is a kind of 'before running' enforcement: Query loading data into out-of-quota schema/role will be forbidden before query is running. It could not cancel the query whose quota limit is reached dynamically during the query is running. DBA could use show_fast_schema_quota_view and show_fast_role_quota_view to check which schema/role is out of limit and decide to grant more quota to that schema/role or not.
+* [Diskquota是什么](#Diskquota是什么)
+* [Diskquota架构](#Diskquota架构)
+* [Diskquota快速上手](#Diskquota快速上手)
 
+# Diskquota是什么
+Diskquota extension是Greenplum6.0提供的磁盘配额管理工具,它支持控制数据库schema和role的磁盘使用量。当DBA为schema或者role设置磁盘配额上限后，diskquota工作进程会负责监控该schema和role的磁盘使用量，并维护包含超出配额上线的schema和role的黑名单。当用户试图往黑名单中的schema或者role中插入数据，该操作会被禁止。
 
-* [Postgresql Diskquota](#postgresql-diskquota)
-* [What Is Diskquota](#what-is-diskquota)
-* [Design Of Diskquota](#design-of-diskquota)
-* [How to use Diskquota](#how-to-use-diskquota)
-* [Known Issue](#known-issue)
+Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部分。对于CPU，Memory等资源，Greenplum的Resource Group模块可以
 
-
-# Postgresql Diskquota
-Greenplum diskquota is based on the project [Postgresql Diskquota](https://github.com/greenplum-db/diskquota). Postgresql Diskquota is inspired by Heikki's [pg_quota](https://github.com/hlinnaka/pg_quota) project
-
-The Wiki of Postgresql diskquota is at [Postgresql Diskquota Design](https://github.com/greenplum-db/diskquota/wiki/Postgresql-Diskquota-Design).
-
-Greenplum diskquota follows the most of design of postgresql diskquota. At the same time, it supports diskquota extension on MPP architecture. The main difference is described as follows:
-1. Using SPI to fetch active tables from each Segments instead of read active tables from shared memory directly.
-2. Support AO/CO format tables.
-
-# What Is Diskquota
+Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时，延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
 
 
-# Design Of Diskquota
+# Diskquota架构
+Diskquota设计伊始，主要考虑了如下几个问题：
+1. 实现为native feature还是extension。
+2. 使用单独进程管理diskquota模型，还是将数据库对象的实时用量存储在系统表中。
+3. 对于单独进程管理diskquota模型的方案，如何实现Greenplum Master和Segment之间的通信。
+
+最终diskquota extension的架构由以下四部分组成。
+
+1. Quota Status Checker。负责维护diskquota模型，计算schema和role的实时磁盘用量，生成超出限额的schema和role的黑名单。
+2. Quota Change Detector.
+
+
 To implement diskquota feature, we split the functionality into four parts.
 1. Quota Status Checker. It maintains the diskquota model, calculate the schema or role whose quota limit is reached.
 2. Quota Change Detector. It's responsible for detecting the change of disk usage, which is introduced by INSERT, COPY, DROP, VACUUM FULL etc. operations. It will report the active tables to Status Checker.
@@ -117,7 +116,7 @@ create table diskquota.quota_config (targetOid oid, quotatype int, quotalimitMB 
 ## Diskquota HA
 Diskquota support HA feature based on background worker framework. Postmaster on standby master will not start diskquota launcher process when it's in standby mode. Diskquota launcher process only exists on master node. When master is down and DBA run `activatestandy` command, standby master change its role to master and diskquota launcher process will be forked automatically. Based on the diskquota enabled database list, corresponding diskquota worker processes will be created by diskquota launcher process to do the real diskquota job.
 
-# How to use Diskquota
+# Diskquota快速上手
 ## Install
 1. Download diskquota from [diskquota repo](https://github.com/greenplum-db/diskquota/tree/gpdb) and install it.
 ```
