@@ -7,9 +7,9 @@
 # Diskquota是什么
 Diskquota extension是Greenplum6.0提供的磁盘配额管理工具,它支持控制数据库schema和role的磁盘使用量。当DBA为schema或者role设置磁盘配额上限后，diskquota工作进程会负责监控该schema和role的磁盘使用量，并维护包含超出配额上线的schema和role的黑名单。当用户试图往黑名单中的schema或者role中插入数据，该操作会被禁止。
 
-Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部分。对于CPU，Memory等资源，Greenplum的Resource Group模块可以
+Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部分。Greenplum的Resource Group模块支持对CPU，Memory等资源进行分配。Diskquota则是对磁盘资源的细粒度分配，支持在schema和role的层级进行磁盘用量的控制，这是传统基于的cron job的磁盘管理工具做不到的。企业可以选择为不同的部门分配专属schema，从而实现对部门的磁盘限额。
 
-Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时，延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
+需要指出Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时，因此schema和role的磁盘用量可能会超出限额。延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
 
 
 # Diskquota架构
@@ -21,48 +21,38 @@ Diskquota设计伊始，主要考虑了如下几个问题：
 最终diskquota extension的架构由以下四部分组成。
 
 1. Quota Status Checker。负责维护diskquota模型，计算schema和role的实时磁盘用量，生成超出限额的schema和role的黑名单。
-2. Quota Change Detector.
-
-
-To implement diskquota feature, we split the functionality into four parts.
-1. Quota Status Checker. It maintains the diskquota model, calculate the schema or role whose quota limit is reached.
-2. Quota Change Detector. It's responsible for detecting the change of disk usage, which is introduced by INSERT, COPY, DROP, VACUUM FULL etc. operations. It will report the active tables to Status Checker.
-3. Quota Enforcement Operator. It's responsible for cancelling the queries which loading data into schema or role whose quota limit is exceeded.
-4. Quota Setting Store. It's where the user defined quota limit of a schema or a role to be stored.
+2. Quota Change Detector。负责监测磁盘变化。INSERT，COPY，DROP，VACUUM FULL等语句会改变数据表的大小，我们称被改变的数据表为活跃表，Quota Change Detector将活跃表存入共享内存，以供Quota Status Checker使用。
+3. Quota Enforcement Operator。负责取消查询。当执行INSERT，UPDATE，COPY等操作时，如果被操作表所在schema或所属role超出了磁盘限额，查询会被取消。
+4. Quota Setting Store。负责存储DBA定义的schema和role的磁盘配额。
 
 ![GP_diskquota](images/GPdiskquota.png)
 **Figure 1. High-Level Greenplum Diskquota Architecture**
 
 ## Quota Status Checker
-Quota Status Checker is based on background worker framework. There are two kinds of background workers: diskquota launcher and diskquota worker.
+Quota Status Checker基于Greenplum background worker框架实现，包含两类bgworker: diskquota launcher和diskquota worker。diskquota worker通过SPI与Segment进行交互，因此diskquota launcher和diskquota worker都只运行在Master节点。
 
-Both diskquota launcher process and worker process are all run at Greenplum Master node. Diskquota worker processes will use SPI to communicate with Segment nodes which will be described later.
+diskquota launcher负责管理diskquota worker。每个集群只有一个launcher，并且运行在Master节点。laucher进程在数据库启动时(具体时间是Postmaster加载diskquota链接库的时候)被注册并运行。
 
-Launcher process is used to manage the worker processes for each databases. There is only one launcher process per database cluster(i.e. one launcher per postmaster).
-Launcher process, as a background worker, is registered in _PG_init() of diskquota.so, which mean it will be started at the beginning of database start. During database startup, it will call RegisterDynamicBackgroundWorker() to create diskquota worker processes to monitor databases which are listed in table `database_list` in database `diskquota`. During database running, it also support to add/delete worker process dynamically by calling `create extension diskquota;`or `drop extension diskquota;` in the database separately.
+Laucher进程主要负责：
+1. 当launcher启动时，基于数据库'diskquota'中的已启动diskquota extension的数据库列表，为每一个列表中数据库启动diskquota worker进程。
+2. 当laucher运行中，监听数据库`Create Extension diskquota`和`Drop Extension diskquota`的请求，启动或中止相关worker进程，并更改数据库'diskquota'中的已启动diskquota extension的数据库列表。
+3. 当launcher正常退出时，通知所有diskquota worker进程退出。
 
-Worker processes are the Quota Status Checkers for each monitored database. Worker processes are responsible for monitoring the disk usage of schemas and roles for the target database. It will periodically (can be set via diskquota.naptime) recalculate the table size of active tables, and update their corresponding schema or owner's disk usage. Then compare with user defined quota limit for those schemas or roles. If exceeds the limit, put the corresponding schemas or roles into the diskquota blacklist in shared memory. Schemas or roles in blacklist are used to do query enforcement to cancel queries which plan to load data into these schemas or roles.
+diskquota worker进程实际扮演Quota Status Checkers的角色。每个启动diskquota extension的数据库都有隶属于自己worker进程。没有采用一个worker进程监控多个数据库是由于Greenplum和Postgres存在一个进程只能访问一个数据库的限制。由于每个worker进程占用数据库连接和资源，我们为同时启动disk extension的数据库的个数设置了上限：10。
 
-Worker processes maintain the table size information in local memory(table_size_map). To support fast database size check function, we flush table_size_map/namespace_size_map to user table diskquota.table_size/diskquota.namespace_size periodically. The flush algorithm is described in diskquota model refreshing algorithm step 3.6.
+Worker进程主要负责：
+1. 初始化diskquota模型，从表`diskquota.table_size`中读取所有table的磁盘用量，并计算schema和role的磁盘用量。对于非空数据库第一次启动diskquota extension，DBA需要调用UDF diskquota.init_table_size_table()对表`diskquota.table_size`进行初始化。该初始化需要计算数据库中的所有数据文件的大小，因此根据数据库大小，可能是一个耗时的操作。初始化完毕后，表`diskquota.table_size`将会由worker进程自动更新。
+2. 以diskquota.naptime为最小刷新频率，周期性维护diskquota模型，包括所有table，schema，role的磁盘用量和超出diskquota限额的黑名单。
 
-UDF diskquota.init_table_size_table() is used to initialize the table diskquota.table_size when it is the first time to enable diskquota extension for this database. After initialization succeeds, flag is set to `ready` in table diskquota.state which is used by diskquota model initialization step in worker process described below.  Note that for the database with millions of files, the cost of UDF diskquota.init_table_size_table() is similar to pg_database_size() which would be extremely slow.
-
-View diskquota.show_schema_quota_view is used to check the schema size/quota quickly based on table diskquota.schema_size. This could be treated as a fast version of pg_database_size().
-
-The Algorithm to initialize diskquota model.
-1. If diskquota.state is not set to `ready`, it will sleep the `naptime` and try again.
-2. If diskquota.state is set to `ready`, then worker process is able to load the table size information from diskquota.table_size into table_size_map.
-3. Follow other steps in diskquota model refreshing algorithm to finish the initialization work.
-
-The Algorithm to refresh diskquota model in each refresh interval is as follows:
-1. Fetch the latest user defined quota limit by reading table 'diskquota.quota_config'.
-2. Call SPI function to fetch global active table lists from all the Segments. Each SPI QE will fetch local active table list(table_oid and size) from Active Tables shared memory on Segments. Table size on Segments is calculated by function pg_total_relation_size(table_oid). Diskquota worker on Master will sum the active table size from each segments to generate the global active table list(which includes table_oid and total_size). Note that this logic is implemented in gp_activetable.c which is the main difference between Greenplum diskquota and Postgresql diskquota.
-3. Traverse user tables in pg_class:
-    1. If table is in active table list, calculate the delta of table size change, update the corresponding table_size_map, namespace_size_map and role_size_map.
-    2. If table is in active table list, mark table to be need_to_flush in table_size_map.
-    3. If table's schema change, move the quota from old schema to new schema in namespace_size_map.
-    4. If table's owner change, move the quota from old owner to new owner in role_size_map.
-    5. Mark table is existed(not dropped) in table_size_map.
+刷新diskquota模型的算法如下：
+1. 获取schema和role的最新磁盘配额，配额记录在表'diskquota.quota_config'中.
+2. 获取活跃表的磁盘使用量，首先调用SPI函数，从所有Segments的共享内存中获取全局活跃表的列表。之后，汇总计算全局活跃表在所有Segment上的磁盘使用量（通过调用pg_total_relation_size(table_oid)计算）。
+3. 遍历pg_class系统表：
+    1. 如果table在活跃表中，计算table磁盘使用量的变化值，并更新对应table_size_map, namespace_size_map和role_size_map。
+    2. 如果table在活跃表中，标记该表的need_to_flush flag为true
+    3. 如果table的schema发生变化, 将该表的磁盘使用量从旧schema移动到新schema。
+    4. 如果table的owner(role)发生变化, 将该表的磁盘使用量从旧role移动到新role。
+    5. 标识table的is_existed flag为true
     6. If flush_to_disk_interval is reached, flush the `need_to_flush` tables and their size information into table: diskquota.table_size. Since `update` for each `need_to_flush` table is slow. We batch the `update` statements to one `delete` and one `insert` statement, which makes algorithm complexity from O(N) to O(1). To be specific, using `delete from diskquota.table_size where tableoid in (need_to_flush oid list)` and `insert into diskquota.table_size values(need_to_flush oid and size list)` instead.
 4. Traverse table_size_map and detect 'dropped' tables in step 3.4. Reduce the quota from corresponding namespace_size_map and role_size_map.
 5. Traverse namespace in pg_namespace:
@@ -71,6 +61,13 @@ The Algorithm to refresh diskquota model in each refresh interval is as follows:
 6. Traverse role in pg_role:
     1. remove the dropped role from role_size_map.
     2. compare the quota usage and quota limit for each role, put the out-of-quota role into blacklist.
+
+
+View diskquota.show_schema_quota_view is used to check the schema size/quota quickly based on table diskquota.schema_size. This could be treated as a fast version of pg_database_size().
+
+
+The Algorithm to refresh diskquota model in each refresh interval is as follows:
+
 
 Here are some optimization opportunities in the above algorithms. We leave them as future optimization.
 1. Refetch table 'diskquota.quota_config' only when DBA modified the quota limit of namespaces or roles.
