@@ -53,65 +53,28 @@ Worker进程主要负责：
     3. 如果table的schema发生变化, 将该表的磁盘使用量从旧schema移动到新schema。
     4. 如果table的owner(role)发生变化, 将该表的磁盘使用量从旧role移动到新role。
     5. 标识table的is_existed flag为true
-    6. If flush_to_disk_interval is reached, flush the `need_to_flush` tables and their size information into table: diskquota.table_size. Since `update` for each `need_to_flush` table is slow. We batch the `update` statements to one `delete` and one `insert` statement, which makes algorithm complexity from O(N) to O(1). To be specific, using `delete from diskquota.table_size where tableoid in (need_to_flush oid list)` and `insert into diskquota.table_size values(need_to_flush oid and size list)` instead.
-4. Traverse table_size_map and detect 'dropped' tables in step 3.4. Reduce the quota from corresponding namespace_size_map and role_size_map.
-5. Traverse namespace in pg_namespace:
-    1. remove the dropped namespace from namespace_size_map.
-    2. compare the quota usage and quota limit for each namespace, put the out-of-quota namespace into blacklist.
-6. Traverse role in pg_role:
-    1. remove the dropped role from role_size_map.
-    2. compare the quota usage and quota limit for each role, put the out-of-quota role into blacklist.
+4. 遍历table_size_map，基于is_existed flag识别被删除的表，并减少相关schema和role的磁盘使用量。
+5. 遍历pg_namespace系统表:
+    1. 从namespace_size_map删除对应schema。
+    2. 比较每个schema的磁盘使用量和限额，将超出限额的schema放入diskquota黑名单。
+6. 遍历pg_role系统表:
+    1. 从role_size_map删除对应role。
+    2. 比较每个role的磁盘使用量和限额，将超出限额的role放入diskquota黑名单。
+7. 遍历table_size_map，基于need_to_flush flag将表的磁盘使用量写入数据表'diskquota.table_size'。Update操作需要针对每条数据执行一条SQL语句，为了加速操作使用批量Delete+批量Insert的方式代替逐条Update。具体来说通过以下两条SQL语句处理所有大小发生变化的表：`delete from diskquota.table_size where tableoid in (need_to_flush oid list)`和`insert into diskquota.table_size values(need_to_flush oid and size list)`。
 
-
-View diskquota.show_schema_quota_view is used to check the schema size/quota quickly based on table diskquota.schema_size. This could be treated as a fast version of pg_database_size().
-
-
-The Algorithm to refresh diskquota model in each refresh interval is as follows:
-
-
-Here are some optimization opportunities in the above algorithms. We leave them as future optimization.
-1. Refetch table 'diskquota.quota_config' only when DBA modified the quota limit of namespaces or roles.
-2. Avoid to traverse pg_class. We currently depend on traversing pg_class to detect dropped table, altered namespace and altered owner. We could use separate hooks to remove this cost.
-3. Although we only calculate pg_total_relation_size() for active tables, whose cost is small in most cases. We could remove pg_total_relation_size() function call by replacing it with the delta of table size change. e.g. each smgr_extend()'s delta is exactly one block size. Side effect is that delta based method better to have calibration step to ensure quota model is correct.
 
 
 ## Quota Change Detector
-Quota Change Detector is implemented as Hooks in smgr function and cdbbufferedappend function(For AO/CO tables). When table size changed, the corresponding hooks in function smgrcreate()/smgrextend()/smgrtruncate()/smgrdounlinkall() and BufferedAppendWrite() will be called on Segments. These hooks will write the changed relfilenode into shared memory called Active Tables on each Segments. Diskquota worker process on Master will periodically fetch global active table list from each Segments by calling SPI function. SPI function, which is running at Segment QE, will firstly convert relfilenode to relation oid, and then calculate Segment level table size by calling pg_total_relation_size(), which will sum the size of a table(including: base, vm, fsm, toast and index). Diskquota worker process will then sum the active table result from each Segments to generate global active table list, which is described in the Quota Status Checker section. 
-
-Here is code fragment of smgr hook implementation.
-```
-void report_active_table_helper(const RelFileNodeBackend *relFileNode)
-{
-    DiskQuotaActiveTableFileEntry item;
-    MemSet(&item, 0, sizeof(DiskQuotaActiveTableFileEntry));
-    item.dbid = relFileNode->node.dbNode;
-    item.relfilenode = relFileNode->node.relNode;
-    item.tablespaceoid = relFileNode->node.spcNode;
-
-    LWLockAcquire(active_table_shm_lock->lock, LW_EXCLUSIVE);
-    entry = hash_search(active_tables_map, &item, HASH_ENTER_NULL, &found);
-    if (entry && !found)
-        *entry = item;
-    LWLockRelease(active_table_shm_lock->lock);
-}
-```
-Quota Change Detector enable us to reduce the cost of refreshing diskquota model.
+Quota Change Detector通过一系列Hook函数实现。对于Heap表，在smgrcreate()/smgrextend()/smgrtruncate()等位置设置Hook函数，记录活跃表信息；对于AO表和CO表，在BufferedAppendWrite/copy_append_only_data/TruncateAOSegmentFile等位置设置Hook函数，记录活跃表信息。活跃表被存储在每个Segment的共享内存中，等待Quota Status Checker周期性查询。由于活跃表只是一个子集，显著减少了每次刷新diskquota模型的代价。
 
 ## Quota Enforcement Operator
-Quota Enforcement Operator is also implemented as hooks. Hook functions will check whether the corresponding schema or role is in diskquota blacklist. For soft limit diskquota, it only support one kind of enforcement hooks: enforcement hook before query is running.
-
-The corresponding 'before query run' hook is implemented at ExecutorCheckPerms_hook in function ExecCheckRTPerms().
-
-
+Quota Enforcement Operator同样通过Hook函数实现。通过重用Greenplum的Hook函数ExecutorCheckPerms_hook，实现在每次插入和更新数据前，检查目标schema或role是否在diskquota的黑名单中，并中止击中黑名单的查询。
 
 ## Quota Setting Store
-Quota limit of a schema or a role is stored in table 'quota_config' in schema 'diskquota' in monitored database. So each database stores and manages its own disk quota configuration. Note that although role is a db object in cluster level, we limit the diskquota of a role to be database specific. That is to say, a role may has different quota limit on different databases and role's disk usages are also isolated between databases. Quota Setting Store is defined as the following table.
+diskquota的磁盘配额分为schema和role两类，存储在数据表'diskquota.quota_config'中。每一个启动diskquota的数据库存储和管理自己的磁盘配额。需要指出的是，尽管role不隶属于数据库，而是一个数据库集群的对象，在diskquota中将role的磁盘配额限定为数据库特定。即role会在不同的数据库由不同的配额，role的磁盘使用量也是不同数据库独立计算。Quota Setting Store被定义为如下数据表。
 ```
 create table diskquota.quota_config (targetOid oid, quotatype int, quotalimitMB int8, PRIMARY KEY(targetOid, quotatype));
 ```
-
-## Diskquota HA
-Diskquota support HA feature based on background worker framework. Postmaster on standby master will not start diskquota launcher process when it's in standby mode. Diskquota launcher process only exists on master node. When master is down and DBA run `activatestandy` command, standby master change its role to master and diskquota launcher process will be forked automatically. Based on the diskquota enabled database list, corresponding diskquota worker processes will be created by diskquota launcher process to do the real diskquota job.
 
 # Diskquota快速上手
 ## 安装
@@ -210,3 +173,13 @@ select * from diskquota.show_fast_schema_quota_view;
 ```
 select * from diskquota.show_fast_role_quota_view;
 ```
+
+
+
+## Diskquota HA
+Diskquota support HA feature based on background worker framework. Postmaster on standby master will not start diskquota launcher process when it's in standby mode. Diskquota launcher process only exists on master node. When master is down and DBA run `activatestandy` command, standby master change its role to master and diskquota launcher process will be forked automatically. Based on the diskquota enabled database list, corresponding diskquota worker processes will be created by diskquota launcher process to do the real diskquota job.
+
+Here are some optimization opportunities in the above algorithms. We leave them as future optimization.
+1. Refetch table 'diskquota.quota_config' only when DBA modified the quota limit of namespaces or roles.
+2. Avoid to traverse pg_class. We currently depend on traversing pg_class to detect dropped table, altered namespace and altered owner. We could use separate hooks to remove this cost.
+3. Although we only calculate pg_total_relation_size() for active tables, whose cost is small in most cases. We could remove pg_total_relation_size() function call by replacing it with the delta of table size change. e.g. each smgr_extend()'s delta is exactly one block size. Side effect is that delta based method better to have calibration step to ensure quota model is correct.
