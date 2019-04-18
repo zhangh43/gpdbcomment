@@ -114,20 +114,21 @@ create table diskquota.quota_config (targetOid oid, quotatype int, quotalimitMB 
 Diskquota support HA feature based on background worker framework. Postmaster on standby master will not start diskquota launcher process when it's in standby mode. Diskquota launcher process only exists on master node. When master is down and DBA run `activatestandy` command, standby master change its role to master and diskquota launcher process will be forked automatically. Based on the diskquota enabled database list, corresponding diskquota worker processes will be created by diskquota launcher process to do the real diskquota job.
 
 # Diskquota快速上手
-## Install
-1. Download diskquota from [diskquota repo](https://github.com/greenplum-db/diskquota/tree/gpdb) and install it.
+## 安装
+1. 开源版diskquota下载地址：[diskquota repo](https://github.com/greenplum-db/diskquota/tree/gpdb)，安装步骤如下
 ```
+# source greenplum_path.sh
 cd $diskquota; 
 make; 
 make install;
 ```
 
-2. Create database 'diskquota' to store the diskquota enabled database list.
+2. 创建数据库'diskquota' 用来持久化启动diskquota的数据库列表。
 ```
 create database diskquota;
 ```
 
-3. Enable diskquota as preload shared library
+3. 将diskquota添加到shared_preload_libraries列表
 ```
 # enable diskquota in preload shared library.
 gpconfig -c shared_preload_libraries -v 'diskquota'
@@ -135,31 +136,32 @@ gpconfig -c shared_preload_libraries -v 'diskquota'
 gpstop -ar
 ```
 
-4. Config GUC of diskquota.
+4. 配置diskquota的刷新频率
 ```
 # set naptime (second) to refresh the disk quota stats periodically
 gpconfig -c diskquota.naptime -v 2
 ```
 
-5. Create diskquota extension in monitored database.
+5. 创建diskquota extension，例如希望在'postgres'数据库启用diskqota extension。
 ```
 # suppose we are in database 'postgres'
 create extension diskquota;
 ```
 
-6. [optional] If create diskquota extension on an non-empty database. It is required to initialize the table size information at first. Note that depend on the existing data file numbers, initialization may take a long time to finish.
+6. 如果DBA在非空数据库创建了dikquota extension，会收到提示信息，需要手动执行UDF初始化表`table_size`。根据数据库中已经存在的文件数，该操作可能耗时。 
 ```
+# after create extension diskquota on non empty database
 select diskquota.init_table_size_table();
 ```
 
-7. Drop diskquota extension in database. Suppose we want to disable diskquota feature on 'postgres' database.
+7. 删除diskquota extension，例如希望在'postgres'数据库禁用diskqota extension。
 ```
 # login into 'postgres'
 drop extension diskquota;
 ```
 
-## Usage
-1. Set/Update/Delete schema quota limit using diskquota.set_schema_quota
+## 使用
+1. 设置schema的磁盘配额
 ```
 create schema s1;
 select diskquota.set_schema_quota('s1', '1 MB');
@@ -179,7 +181,7 @@ insert into a select generate_series(1,100);
 reset search_path;
 ```
 
-2. Set/Update/Delete role quota limit using diskquota.set_role_quota
+2. 设置role的磁盘配额
 ```
 create role u1 nologin;
 create table b (i int);
@@ -199,19 +201,12 @@ insert into a select generate_series(1,100);
 reset search_path;
 ```
 
-3. Show schema quota limit and current usage
+3. 查询schema的磁盘使用量和限额
 ```
 select * from diskquota.show_fast_schema_quota_view;
 ```
 
-4. Show role quota limit and current usage
+4. 查询role的磁盘使用量和限额
 ```
 select * from diskquota.show_fast_role_quota_view;
-```
-
-## Test
-Run regression tests.
-```
-cd $diskquota;
-make installcheck
 ```
