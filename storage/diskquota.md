@@ -5,11 +5,11 @@
 * [Diskquota快速上手](#Diskquota快速上手)
 
 # Diskquota是什么
-Diskquota extension是Greenplum6.0提供的磁盘配额管理工具,它支持控制数据库schema和role的磁盘使用量。当DBA为schema或者role设置磁盘配额上限后，diskquota工作进程会负责监控该schema和role的磁盘使用量，并维护包含超出配额上线的schema和role的黑名单。当用户试图往黑名单中的schema或者role中插入数据，该操作会被禁止。
+Diskquota extension是Greenplum6.0提供的磁盘配额管理工具,它支持控制数据库schema和role的磁盘使用量。当DBA为schema或者role设置磁盘配额上限后，diskquota工作进程负责监控该schema和role的磁盘使用量，并维护包含超出配额上限的schema和role的黑名单。当用户试图往黑名单中的schema或者role中插入数据时，操作会被禁止。
 
-Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部分。Greenplum的Resource Group模块支持对CPU，Memory等资源进行分配。Diskquota则是对磁盘资源的细粒度分配，支持在schema和role的层级进行磁盘用量的控制，这是传统基于的cron job的磁盘管理工具做不到的。企业可以选择为不同的部门分配专属schema，从而实现对部门的磁盘限额。
+Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部门。Greenplum的Resource Group模块支持对CPU，Memory等资源进行分配。而Diskquota则是对磁盘资源的细粒度分配，支持在schema和role的层级进行磁盘用量的控制，支持秒级延时的磁盘实时使用量检测，这是传统基于的cron job的磁盘管理工具做不到的。企业可以选择为不同的部门分配专属schema，从而实现对各个部门的磁盘限额。
 
-需要指出Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时，因此schema和role的磁盘用量可能会超出限额。延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
+需要指出Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时（秒级），因此schema和role的磁盘用量可能会超出限额。延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
 
 
 # Diskquota架构
@@ -17,6 +17,7 @@ Diskquota设计伊始，主要考虑了如下几个问题：
 1. 实现为native feature还是extension。
 2. 使用单独进程管理diskquota模型，还是将数据库对象的实时用量存储在系统表中。
 3. 对于单独进程管理diskquota模型的方案，如何实现Greenplum Master和Segment之间的通信。
+4. Diskquota性能及其对于Greenplum数据库的影响。
 
 最终diskquota extension的架构由以下四部分组成。
 
