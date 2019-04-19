@@ -36,14 +36,14 @@ Diskquota工作进程在每个查询周期只对活跃的数据表计算其磁�
 ## Quota Status Checker
 Quota Status Checker基于Greenplum background worker框架实现，包含两类bgworker: diskquota launcher和diskquota worker。
 
-diskquota launcher负责管理diskquota worker。每个集群只有一个launcher，并且运行在Master节点。laucher进程在数据库启动时(具体时间是Postmaster加载diskquota链接库的时候)被注册并运行。
+Diskquota launcher负责管理diskquota worker。每个集群只有一个launcher，并且运行在Master节点。laucher进程在数据库启动时(具体时间是Postmaster加载diskquota链接库的时候)被注册并运行。
 
 Laucher进程主要负责：
-1. 当launcher启动时，基于数据库'diskquota'中的已启动diskquota extension的数据库列表，为每一个列表中数据库启动diskquota worker进程。
-2. 当laucher运行中，监听数据库`Create Extension diskquota`和`Drop Extension diskquota`的请求，启动或中止相关worker进程，并更改数据库'diskquota'中的已启动diskquota extension的数据库列表。
+1. 当launcher启动时，基于数据库`diskquota`中已启动diskquota extension的数据库列表，为每一个列表中数据库启动diskquota worker进程。
+2. 当laucher运行中，监听数据库`Create Extension diskquota`和`Drop Extension diskquota`请求，启动或中止相关worker进程，并更改数据库`diskquota`中的已启动diskquota extension的数据库列表。
 3. 当launcher正常退出时，通知所有diskquota worker进程退出。
 
-diskquota worker进程实际扮演Quota Status Checkers的角色。每个启动diskquota extension的数据库都有隶属于自己worker进程。没有采用一个worker进程监控多个数据库是由于Greenplum和Postgres存在一个进程只能访问一个数据库的限制。由于每个worker进程占用数据库连接和资源，我们为同时启动disk extension的数据库的个数设置了上限：10。diskquota worker通过SPI与Segment进行交互，因此，diskquota worker同样只运行在Master节点。
+Diskquota worker进程实际扮演Quota Status Checkers的角色。每个启动diskquota extension的数据库都有隶属于自己worker进程。没有采用一个worker进程监控多个数据库是由于Greenplum和Postgres存在一个进程只能访问一个数据库的限制。由于每个worker进程占用数据库连接和资源，我们为同时启动disk extension的数据库个数设置了上限：10。diskquota worker通过SPI与Segment进行交互，因此，diskquota worker同样只运行在Master节点。
 
 Worker进程主要负责：
 1. 初始化diskquota模型，从表`diskquota.table_size`中读取所有table的磁盘用量，并计算schema和role的磁盘用量。对于非空数据库第一次启动diskquota extension，DBA需要调用UDF diskquota.init_table_size_table()对表`diskquota.table_size`进行初始化。该初始化需要计算数据库中的所有数据文件的大小，因此根据数据库大小，可能是一个耗时的操作。初始化完毕后，表`diskquota.table_size`将会由worker进程自动更新。
@@ -51,7 +51,7 @@ Worker进程主要负责：
 
 刷新diskquota模型的算法如下：
 1. 获取schema和role的最新磁盘配额，配额记录在表'diskquota.quota_config'中.
-2. 获取活跃表的磁盘使用量，首先调用SPI函数，从所有Segments的共享内存中获取全局活跃表的列表。之后，汇总计算全局活跃表在所有Segment上的磁盘使用量（通过调用pg_total_relation_size(table_oid)计算）。
+2. 获取活跃表的磁盘使用量，首先调用SPI函数，从所有Segment的共享内存中获取全局活跃表的列表。之后，汇总计算全局活跃表在所有Segment上的磁盘使用量（通过调用pg_total_relation_size(table_oid)计算，pg_total_relation_size会自动计算数据主表，索引表，toast表，fsm表等数据表的总磁盘用量）。
 3. 遍历pg_class系统表：
     1. 如果table在活跃表中，计算table磁盘使用量的变化值，并更新对应table_size_map, namespace_size_map和role_size_map。
     2. 如果table在活跃表中，标记该表的need_to_flush flag为true
@@ -65,7 +65,7 @@ Worker进程主要负责：
 6. 遍历pg_role系统表:
     1. 从role_size_map删除对应role。
     2. 比较每个role的磁盘使用量和配额，将超出配额的role放入diskquota黑名单。
-7. 遍历table_size_map，基于need_to_flush flag将表的磁盘使用量写入数据表'diskquota.table_size'。Update操作需要针对每条数据执行一条SQL语句，为了加速操作使用批量Delete+批量Insert的方式代替逐条Update。具体来说通过以下两条SQL语句处理所有大小发生变化的表：`delete from diskquota.table_size where tableoid in (need_to_flush oid list)`和`insert into diskquota.table_size values(need_to_flush oid and size list)`。
+7. 遍历table_size_map，基于need_to_flush flag将表的磁盘使用量写入数据表`diskquota.table_size`。Update操作需要针对每条数据执行一条SQL语句，为了加速操作,使用批量Delete+批量Insert的方式代替逐条Update。具体来说通过以下两条SQL语句处理所有大小发生变化的表：`delete from diskquota.table_size where tableoid in (need_to_flush oid list)`和`insert into diskquota.table_size values(need_to_flush oid and size list)`。
 
 
 
@@ -76,7 +76,7 @@ Quota Change Detector通过一系列Hook函数实现。对于Heap表，在smgrcr
 Quota Enforcement Operator同样通过Hook函数实现。通过重用Greenplum的Hook函数ExecutorCheckPerms_hook，实现在每次插入和更新数据前，检查目标schema或role是否在diskquota的黑名单中，并中止击中黑名单的查询。
 
 ## Quota Setting Store
-diskquota的磁盘配额分为schema和role两类，存储在数据表'diskquota.quota_config'中。每一个启动diskquota的数据库存储和管理自己的磁盘配额。需要指出的是，尽管role不隶属于数据库，而是一个数据库集群的对象，在diskquota中将role的磁盘配额限定为数据库特定。即role会在不同的数据库由不同的配额，role的磁盘使用量也是不同数据库独立计算。Quota Setting Store被定义为如下数据表。
+diskquota的磁盘配额分为schema和role两类，存储在数据表'diskquota.quota_config'中。每一个启动diskquota的数据库存储和管理自己的磁盘配额。需要指出的是，尽管role不隶属于数据库，而是一个数据库集群的对象，在diskquota中将role的磁盘配额限定为数据库特定。即role会在不同的数据库有不同的配额，role的磁盘使用量也是不同数据库独立计算。Quota Setting Store被定义为如下数据表。
 ```
 create table diskquota.quota_config (targetOid oid, quotatype int, quotalimitMB int8, PRIMARY KEY(targetOid, quotatype));
 ```
@@ -91,7 +91,7 @@ make;
 make install;
 ```
 
-2. 创建数据库'diskquota' 用来持久化启动diskquota的数据库列表。
+2. 创建数据库`diskquota` 用来持久化启动diskquota extension的数据库列表。
 ```
 create database diskquota;
 ```
@@ -104,13 +104,13 @@ gpconfig -c shared_preload_libraries -v 'diskquota'
 gpstop -ar
 ```
 
-4. 配置diskquota的刷新频率
+4. 配置diskquota extension的刷新频率
 ```
 # set naptime (second) to refresh the disk quota stats periodically
 gpconfig -c diskquota.naptime -v 2
 ```
 
-5. 创建diskquota extension，例如希望在`postgres`数据库启用diskqota extension。
+5. 创建diskquota extension，例如希望在`postgres`数据库启用diskqota extension, 执行如下语句。
 ```
 # suppose we are in database 'postgres'
 create extension diskquota;
@@ -122,7 +122,7 @@ create extension diskquota;
 select diskquota.init_table_size_table();
 ```
 
-7. 删除diskquota extension，例如希望在'postgres'数据库禁用diskqota extension。
+7. 删除diskquota extension，例如希望在'postgres'数据库禁用diskqota extension，执行如下语句。
 ```
 # login into 'postgres'
 drop extension diskquota;
