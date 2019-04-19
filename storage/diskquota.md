@@ -7,9 +7,9 @@
 # Diskquota是什么
 Diskquota extension是Greenplum6.0提供的磁盘配额管理工具,它支持控制数据库schema和role的磁盘使用量。当DBA为schema或者role设置磁盘配额上限后，diskquota工作进程负责监控该schema和role的磁盘使用量，并维护包含超出配额上限的schema和role的黑名单。当用户试图往黑名单中的schema或者role中插入数据时，操作会被禁止。
 
-Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部门。Greenplum的Resource Group功能支持对CPU，Memory等资源进行分配。而Diskquota则是对磁盘资源的细粒度分配，支持在schema和role的层级进行磁盘用量的控制，支持秒级延时的磁盘实时使用量检测，这是传统基于的cron job的磁盘管理工具做不到的。企业可以选择为不同的部门分配专属schema，从而实现对各个部门的磁盘限额。
+Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部门。Greenplum的Resource Group功能支持对CPU，Memory等资源进行分配。而Diskquota则是对磁盘资源的细粒度分配，支持在schema和role的层级进行磁盘用量的控制，支持秒级延时的磁盘实时使用量检测，这是传统基于的cron job的磁盘管理工具做不到的。企业可以选择为不同的部门分配专属schema，从而实现对各个部门的磁盘配额分配。
 
-需要指出Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时（秒级），因此schema和role的磁盘用量可能会超出限额。延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
+需要指出Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时（秒级），因此schema和role的磁盘用量可能会超出配额。延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
 
 
 # Diskquota架构
@@ -25,9 +25,9 @@ Diskquota工作进程在每个查询周期只对活跃的数据表计算其磁�
 
 最终diskquota extension的架构由以下四部分组成。
 
-1. Quota Status Checker。负责维护diskquota模型，计算schema和role的实时磁盘用量，生成超出限额的schema和role的黑名单。
+1. Quota Status Checker。负责维护diskquota模型，计算schema和role的实时磁盘用量，生成超出配额的schema和role的黑名单。
 2. Quota Change Detector。负责监测磁盘变化。INSERT，COPY，DROP，VACUUM FULL等语句会改变数据表的大小，我们称被改变的数据表为活跃表，Quota Change Detector将活跃表存入共享内存，以供Quota Status Checker使用。
-3. Quota Enforcement Operator。负责取消查询。当执行INSERT，UPDATE，COPY等操作时，如果被操作表所在schema或所属role超出了磁盘限额，查询会被取消。
+3. Quota Enforcement Operator。负责取消查询。当执行INSERT，UPDATE，COPY等操作时，如果被操作表所在schema或所属role超出了磁盘配额，查询会被取消。
 4. Quota Setting Store。负责存储DBA定义的schema和role的磁盘配额。
 
 ![GP_diskquota](images/GPdiskquota.png)
@@ -47,7 +47,7 @@ diskquota worker进程实际扮演Quota Status Checkers的角色。每个启动d
 
 Worker进程主要负责：
 1. 初始化diskquota模型，从表`diskquota.table_size`中读取所有table的磁盘用量，并计算schema和role的磁盘用量。对于非空数据库第一次启动diskquota extension，DBA需要调用UDF diskquota.init_table_size_table()对表`diskquota.table_size`进行初始化。该初始化需要计算数据库中的所有数据文件的大小，因此根据数据库大小，可能是一个耗时的操作。初始化完毕后，表`diskquota.table_size`将会由worker进程自动更新。
-2. 以diskquota.naptime为最小刷新频率，周期性维护diskquota模型，包括所有table，schema，role的磁盘用量和超出diskquota限额的黑名单。
+2. 以diskquota.naptime为最小刷新频率，周期性维护diskquota模型，包括所有table，schema，role的磁盘用量和超出diskquota配额的黑名单。
 
 刷新diskquota模型的算法如下：
 1. 获取schema和role的最新磁盘配额，配额记录在表'diskquota.quota_config'中.
@@ -61,10 +61,10 @@ Worker进程主要负责：
 4. 遍历table_size_map，基于is_existed flag识别被删除的表，并减少相关schema和role的磁盘使用量。
 5. 遍历pg_namespace系统表:
     1. 从namespace_size_map删除对应schema。
-    2. 比较每个schema的磁盘使用量和限额，将超出限额的schema放入diskquota黑名单。
+    2. 比较每个schema的磁盘使用量和配额，将超出配额的schema放入diskquota黑名单。
 6. 遍历pg_role系统表:
     1. 从role_size_map删除对应role。
-    2. 比较每个role的磁盘使用量和限额，将超出限额的role放入diskquota黑名单。
+    2. 比较每个role的磁盘使用量和配额，将超出配额的role放入diskquota黑名单。
 7. 遍历table_size_map，基于need_to_flush flag将表的磁盘使用量写入数据表'diskquota.table_size'。Update操作需要针对每条数据执行一条SQL语句，为了加速操作使用批量Delete+批量Insert的方式代替逐条Update。具体来说通过以下两条SQL语句处理所有大小发生变化的表：`delete from diskquota.table_size where tableoid in (need_to_flush oid list)`和`insert into diskquota.table_size values(need_to_flush oid and size list)`。
 
 
@@ -82,7 +82,7 @@ create table diskquota.quota_config (targetOid oid, quotatype int, quotalimitMB 
 ```
 
 # Diskquota快速上手
-## 安装
+## 安装和配置
 1. 开源版diskquota下载地址：[diskquota repo](https://github.com/greenplum-db/diskquota/tree/gpdb)，安装步骤如下
 ```
 # source greenplum_path.sh
@@ -110,7 +110,7 @@ gpstop -ar
 gpconfig -c diskquota.naptime -v 2
 ```
 
-5. 创建diskquota extension，例如希望在'postgres'数据库启用diskqota extension。
+5. 创建diskquota extension，例如希望在`postgres`数据库启用diskqota extension。
 ```
 # suppose we are in database 'postgres'
 create extension diskquota;
@@ -169,12 +169,12 @@ insert into a select generate_series(1,100);
 reset search_path;
 ```
 
-3. 查询schema的磁盘使用量和限额
+3. 查询schema的磁盘使用量和配额
 ```
 select * from diskquota.show_fast_schema_quota_view;
 ```
 
-4. 查询role的磁盘使用量和限额
+4. 查询role的磁盘使用量和配额
 ```
 select * from diskquota.show_fast_role_quota_view;
 ```
