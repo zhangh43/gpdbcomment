@@ -7,17 +7,21 @@
 # Diskquota是什么
 Diskquota extension是Greenplum6.0提供的磁盘配额管理工具,它支持控制数据库schema和role的磁盘使用量。当DBA为schema或者role设置磁盘配额上限后，diskquota工作进程负责监控该schema和role的磁盘使用量，并维护包含超出配额上限的schema和role的黑名单。当用户试图往黑名单中的schema或者role中插入数据时，操作会被禁止。
 
-Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部门。Greenplum的Resource Group模块支持对CPU，Memory等资源进行分配。而Diskquota则是对磁盘资源的细粒度分配，支持在schema和role的层级进行磁盘用量的控制，支持秒级延时的磁盘实时使用量检测，这是传统基于的cron job的磁盘管理工具做不到的。企业可以选择为不同的部门分配专属schema，从而实现对各个部门的磁盘限额。
+Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部门。Greenplum的Resource Group功能支持对CPU，Memory等资源进行分配。而Diskquota则是对磁盘资源的细粒度分配，支持在schema和role的层级进行磁盘用量的控制，支持秒级延时的磁盘实时使用量检测，这是传统基于的cron job的磁盘管理工具做不到的。企业可以选择为不同的部门分配专属schema，从而实现对各个部门的磁盘限额。
 
 需要指出Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时（秒级），因此schema和role的磁盘用量可能会超出限额。延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
 
 
 # Diskquota架构
 Diskquota设计伊始，主要考虑了如下几个问题：
-1. 实现为native feature还是extension。
-2. 使用单独进程管理diskquota模型，还是将数据库对象的实时用量存储在系统表中。
-3. 对于单独进程管理diskquota模型的方案，如何实现Greenplum Master和Segment之间的通信。
-4. Diskquota性能及其对于Greenplum数据库的影响。
+1. 使用单独进程管理diskquota模型，还是将数据库对象的实时用量存储在系统表中。
+系统表pg_class存储了数据表的元数据信息，实现磁盘配额管理的一种方式是在pg_class中添加quota列，用于记录数据表的实时磁盘用量，比如block数。但Diskquota基于Extension框架，不希望改动DB内核，因而选择使用单独的监控进程来管理diskquota模型(维护所有数据表的实时磁盘使用量)。
+
+2. 对于单独进程管理diskquota模型的方案，如何实现Greenplum Master和Segment之间的通信。
+对于diskquota而言，Master和Segment之间的通信内容主要是每个Segment上实时的磁盘使用量数据。由于diskquota是集群级别的磁盘配额管理工具，我们只关心Master节点维护的数据表的全局磁盘使用量。因此，基于Greenplum的SPI框架，Master上的diskquota工作进程可以定期通过SPI查询汇总所有Segment上活跃表的磁盘使用量，Segment不需要常驻diskquota工作进程，而只需要一块存储活跃表的共享内存。
+
+3. Diskquota性能及其对于Greenplum数据库的影响。
+Diskquota工作进程在每个查询周期只对活跃的数据表计算其磁盘使用量，因此其时间复杂度正比于活跃表的个数。当数据库没有数据加载操作时，diskquota对资源占用较低。Greenplum的只读操作不会与diskquota产生交互影响，对于写入和修改等操作，每次数据落盘（新的页面申请）会存在将数据表的relfilenode信息写入共享内存的额外开销。
 
 最终diskquota extension的架构由以下四部分组成。
 
@@ -174,13 +178,3 @@ select * from diskquota.show_fast_schema_quota_view;
 ```
 select * from diskquota.show_fast_role_quota_view;
 ```
-
-
-
-## Diskquota HA
-Diskquota support HA feature based on background worker framework. Postmaster on standby master will not start diskquota launcher process when it's in standby mode. Diskquota launcher process only exists on master node. When master is down and DBA run `activatestandy` command, standby master change its role to master and diskquota launcher process will be forked automatically. Based on the diskquota enabled database list, corresponding diskquota worker processes will be created by diskquota launcher process to do the real diskquota job.
-
-Here are some optimization opportunities in the above algorithms. We leave them as future optimization.
-1. Refetch table 'diskquota.quota_config' only when DBA modified the quota limit of namespaces or roles.
-2. Avoid to traverse pg_class. We currently depend on traversing pg_class to detect dropped table, altered namespace and altered owner. We could use separate hooks to remove this cost.
-3. Although we only calculate pg_total_relation_size() for active tables, whose cost is small in most cases. We could remove pg_total_relation_size() function call by replacing it with the delta of table size change. e.g. each smgr_extend()'s delta is exactly one block size. Side effect is that delta based method better to have calibration step to ensure quota model is correct.
