@@ -1,27 +1,27 @@
-# Greenplum 6.0 新功能介绍——磁盘配额管理工具diskquota
+# Greenplum 6.0 新功能介绍——磁盘配额管理工具Diskquota
 
 * [Diskquota是什么](#Diskquota是什么)
 * [Diskquota架构](#Diskquota架构)
 * [Diskquota快速上手](#Diskquota快速上手)
 
 # Diskquota是什么
-Diskquota extension是Greenplum6.0提供的磁盘配额管理工具,它支持控制数据库schema和role的磁盘使用量。当DBA为schema或者role设置磁盘配额上限后，diskquota工作进程负责监控该schema和role的磁盘使用量，并维护包含超出配额上限的schema和role的黑名单。当用户试图往黑名单中的schema或者role中插入数据时，操作会被禁止。
+Diskquota extension是Greenplum6.0提供的磁盘配额管理工具,它支持控制数据库schema和role的磁盘使用量。当DBA为schema或者role设置磁盘配额上限后，diskquota工作进程负责监控该schema和role的磁盘使用量，并维护超出配额上限的schema和role的黑名单。当用户试图往黑名单中的schema或者role中插入数据时，操作会被禁止。
 
 Diskquota的典型应用场景是对于企业内部多个部门共享一个Greenplum集群，如何分配集群的磁盘资源给不同的部门。Greenplum的Resource Group功能支持对CPU，Memory等资源进行分配。而Diskquota则是对磁盘资源的细粒度分配，支持在schema和role的层级进行磁盘用量的控制，支持秒级延时的磁盘实时使用量检测，这是传统基于的cron job的磁盘管理工具做不到的。企业可以选择为不同的部门分配专属schema，从而实现对各个部门的磁盘配额分配。
 
-需要指出Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时（秒级），因此schema和role的磁盘用量可能会超出配额。延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限地schema和role进行相应处理。
+需要指出Diskquota是对磁盘用量的一种软限制，“软”体现在两个方面： 1. 计算schema和role的实时用量存在一定延时（秒级），因此schema和role的磁盘用量可能会超出配额。延时对应diskquota模型的最小刷新频率，可以通过GUC `diskquota.naptime` 调整其大小。2. 对插入语句，diskquota只做查询前检查。如果加载数据的语句在执行过程中动态地超过了磁盘配额上限，查询并不会被中止。DBA可以通过show_fast_schema_quota_view和show_fast_role_quota_view快速查询每个schema和role的配额和当前使用量，并对超出配额上限的schema和role进行相应处理。
 
 
 # Diskquota架构
 Diskquota设计伊始，主要考虑了如下几个问题：
-1. 使用单独进程管理diskquota模型，还是将数据库对象的实时用量存储在系统表中。
-系统表pg_class存储了数据表的元数据信息，实现磁盘配额管理的一种方式是在pg_class中添加quota列，用于记录数据表的实时磁盘用量，比如block数。但Diskquota基于Extension框架，不希望改动DB内核，因而选择使用单独的监控进程来管理diskquota模型(维护所有数据表的实时磁盘使用量)。
+1. 使用单独进程管理diskquota模型，还是将数据库对象的实时磁盘使用量存储在系统表中。
+系统表pg_class存储了数据表的元数据信息，比如relpages记录了analyze后数据表的页面数。我们没有采用此方式管理diskquota模型，一方面，如果让每次数据加载、删除操作都实时更新relpages等信息，会降低数据库性能；另一方面，diskquota基于extension框架，不希望改动DB内核，因而选择使用单独的监控进程来管理diskquota模型(在diskquot工作进程中维护所有数据表的实时磁盘使用量)。
 
 2. 对于单独进程管理diskquota模型的方案，如何实现Greenplum Master和Segment之间的通信。
-对于diskquota而言，Master和Segment之间的通信内容主要是每个Segment上实时的磁盘使用量数据。由于diskquota是集群级别的磁盘配额管理工具，我们只关心Master节点维护的数据表的全局磁盘使用量。因此，基于Greenplum的SPI框架，Master上的diskquota工作进程可以定期通过SPI查询汇总所有Segment上活跃表的磁盘使用量，Segment不需要常驻diskquota工作进程，而只需要一块存储活跃表的共享内存。
+对于diskquota而言，Master和Segment之间的通信内容主要是每个Segment上实时的磁盘使用量数据。由于diskquota是集群级别的磁盘配额管理工具，我们只关心Master节点维护的数据表的全局磁盘使用量。因此，基于Greenplum的SPI框架，Master上的diskquota工作进程可以定期通过SPI查询，实时计算和汇总所有Segment上活跃表的磁盘使用量，Segment不需要常驻diskquota工作进程，而只需要一块存储活跃表的共享内存。
 
 3. Diskquota性能及其对于Greenplum数据库的影响。
-Diskquota工作进程在每个查询周期只对活跃的数据表计算其磁盘使用量，因此其时间复杂度正比于活跃表的个数。当数据库没有数据加载操作时，diskquota对资源占用较低。Greenplum的只读操作不会与diskquota产生交互影响，对于写入和修改等操作，每次数据落盘（新的页面申请）会存在将数据表的relfilenode信息写入共享内存的额外开销。
+Diskquota工作进程在每个查询周期只对活跃的数据表计算其磁盘使用量，因此其时间复杂度正比于活跃表的个数。当数据库没有数据加载操作时，diskquota没有对IO资源的占用。Greenplum的只读操作不会与diskquota产生交互影响；写入和修改等操作，每次数据落盘（新的页面申请）会存在将数据表的relfilenode信息写入共享内存的额外开销。
 
 最终diskquota extension的架构由以下四部分组成。
 
@@ -31,10 +31,10 @@ Diskquota工作进程在每个查询周期只对活跃的数据表计算其磁�
 4. Quota Setting Store。负责存储DBA定义的schema和role的磁盘配额。
 
 ![GP_diskquota](images/GPdiskquota.png)
-**Figure 1. High-Level Greenplum Diskquota Architecture**
+**图1. Greenplum Diskquota架构**
 
 ## Quota Status Checker
-Quota Status Checker基于Greenplum background worker框架实现，包含两类bgworker: diskquota launcher和diskquota worker。diskquota worker通过SPI与Segment进行交互，因此diskquota launcher和diskquota worker都只运行在Master节点。
+Quota Status Checker基于Greenplum background worker框架实现，包含两类bgworker: diskquota launcher和diskquota worker。
 
 diskquota launcher负责管理diskquota worker。每个集群只有一个launcher，并且运行在Master节点。laucher进程在数据库启动时(具体时间是Postmaster加载diskquota链接库的时候)被注册并运行。
 
@@ -43,7 +43,7 @@ Laucher进程主要负责：
 2. 当laucher运行中，监听数据库`Create Extension diskquota`和`Drop Extension diskquota`的请求，启动或中止相关worker进程，并更改数据库'diskquota'中的已启动diskquota extension的数据库列表。
 3. 当launcher正常退出时，通知所有diskquota worker进程退出。
 
-diskquota worker进程实际扮演Quota Status Checkers的角色。每个启动diskquota extension的数据库都有隶属于自己worker进程。没有采用一个worker进程监控多个数据库是由于Greenplum和Postgres存在一个进程只能访问一个数据库的限制。由于每个worker进程占用数据库连接和资源，我们为同时启动disk extension的数据库的个数设置了上限：10。
+diskquota worker进程实际扮演Quota Status Checkers的角色。每个启动diskquota extension的数据库都有隶属于自己worker进程。没有采用一个worker进程监控多个数据库是由于Greenplum和Postgres存在一个进程只能访问一个数据库的限制。由于每个worker进程占用数据库连接和资源，我们为同时启动disk extension的数据库的个数设置了上限：10。diskquota worker通过SPI与Segment进行交互，因此，diskquota worker同样只运行在Master节点。
 
 Worker进程主要负责：
 1. 初始化diskquota模型，从表`diskquota.table_size`中读取所有table的磁盘用量，并计算schema和role的磁盘用量。对于非空数据库第一次启动diskquota extension，DBA需要调用UDF diskquota.init_table_size_table()对表`diskquota.table_size`进行初始化。该初始化需要计算数据库中的所有数据文件的大小，因此根据数据库大小，可能是一个耗时的操作。初始化完毕后，表`diskquota.table_size`将会由worker进程自动更新。
