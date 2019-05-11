@@ -14,7 +14,9 @@ In-databse分析的痛点问题
 下面，我们按照时间线梳理一下In-databse分析的重要学术论文和工业界产品。
 前面提到，
 
-BigQuery ML 最早于2018年7月发布，
+BigQuery ML 最早于2018年7月发布
+
+
 '''
 CREATE MODEL income_model
  OPTIONS (model_type=‘linear_reg’, labels=[‘income’])
