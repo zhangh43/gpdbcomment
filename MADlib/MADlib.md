@@ -52,7 +52,6 @@ BigQuery ML很好的解决了前三个问题，但使用SQL编写复杂的机器
 
 
 4. UDA based AI algorithm的代表是Apache MADlib。MADlib于2011年诞生,是由Pivotal Greenplum DB团队和高校联合研发的，参与的大学包括伯克利大学加州分校、斯坦福大学、威斯康辛麦迪逊大学、佛罗里达大学。2017年MADlib正式毕业成为Apache顶级项目。MADlib基于数据库User Defined Agrregation（UDA）实现机器学习算法，它完美的解决了In-databse分析的四个问题。
-
 易用性，MADlib通过将机器学习算法封装成数据库的UDF，用户可以使用标准SQL实现机器学习建模和推理，无需引入额外SQL语法，其用户接口如下：
 ```
 SELECT madlib.logregr_train
@@ -70,7 +69,6 @@ SELECT p.id, madlib.logregr_predict(coef, ARRAY[1, treatment, trait_anxiety]),
 FROM patients p, patients_logregr m
 ORDER BY p.id;
 ```
-
 本地性，MADlib的机器学习算法直接在DB的内核中执行。
 可扩展性，Greenplum DB是世界领先的开源MPP数据库，Greenplum与MADlib结合可以实现在DB的大量Segment结点上并行地执行聚集，生成sub state，并在Master结点进行sub state的聚合，从而实现机器学习算法从单结点到集群的扩展。
 通用性，MADlib目前支持50多种机器学习算法。除了核心的机器学习建模和推理，MADlib还支持了数据分析流水线的全部流程，实现了数据分析的闭环。数据科学家在定义好数据分析的问题后，首先进行数据探索，分析和识别数据中可供挖掘的模式，接下来进行数据的预处理、清洗和整合，之后才进行各种类型的建模，包括非监督的数据挖掘任务、有监督的预测建模、文本分析等等。最后还要对建模后的结果进行模型选择，不同的模型有不同的评测标准，往往还会使用交叉验证等技术。MADlib对以上环节都有支持。
