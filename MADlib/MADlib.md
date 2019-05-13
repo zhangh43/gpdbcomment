@@ -5,9 +5,8 @@ SQLFlow的思想最早可以追溯到2005年，当时Thomas Tileston提出了in-
 In-database分析通过扩充SQL的能力，降低了企业应用机器学习技术的门槛，同时解决了数据在不同系统间移动所产生的一系列问题。
 
 In-databse分析主要用于解决以下问题：
-1. 易用性，降低机器学习门槛，掌握SQL的技术人员即可完成大部分的机器学习模型训练及预测任务，TensorFlow和Scikit－learn的技术人员SQL技术人员少了很多。
-2. 本地性，减少数据的移动，存储在数据库中的数据在原地进行机器学习建模和推理，提高了分析效率同时，避免了数据移动过程的安全性问题，减少了team间沟通成本，
-以及建造单独数据分析基础设施的IT成本。
+1. 易用性，降低机器学习门槛，掌握SQL的技术人员即可完成大部分的机器学习模型训练及预测任务，掌握TensorFlow和Scikit-learn的技术人员比掌握SQL的技术人员少了很多。
+2. 本地性，减少数据的移动，存储在数据库中的数据在原地进行机器学习建模和推理，提高了分析效率同时，避免了数据移动过程中存在的安全问题，减少了team间沟通成本，以及建造单独数据分析基础设施的IT成本。
 3. 可扩展性，单机机器学习到集群机器学习的扩展
 4. 通用性，即支持的机器学习算法的丰富性。
 
@@ -38,7 +37,7 @@ results = spark.sql(
 names = results.map(lambda p: p.name)
 ```
 
-3. SQL based AI algotithm的代表是BigQuery ML。BigQuery ML于2018年7月发布, 它在BigQeury数据仓库中内嵌了基于SQL的机器学习算法，
+3. SQL based AI algotithm的代表是BigQuery ML。BigQuery ML于2018年7月发布, 它在Google BigQeury数据仓库中内嵌了基于SQL的机器学习算法，
 技术人员不需要移动数据，也不需要使用Python或者R，就可以使用类SQL的语法直接调用机器学习算法训练模型和预测。
 下面的例子展示了如何在BigQeury ML中训练和使用线性回归模型。
 ```
@@ -51,7 +50,7 @@ SELECT predicted_income FROM PREDICT(MODEL ‘income_model’,
 BigQuery ML很好的解决了前三个问题，但使用SQL编写复杂的机器学习算法虽然并非不可能，但开发效率也相对较低，截至目前，BigQuery ML只支持Linear regression，Logistic regression 和K-means clustering三类机器学习算法。
 
 
-4. UDA based AI algorithm的代表是Apache MADlib。MADlib于2011年诞生(背后论文发表于2009年VLDB),是由Pivotal Greenplum DB团队和高校联合研发的，参与的大学包括伯克利大学加州分校、斯坦福大学、威斯康辛麦迪逊大学、佛罗里达大学。2017年MADlib正式毕业成为Apache顶级项目。MADlib的思想源于论文“MAD skills: new analysis practices for big data”，目前Google引用已达555次，Spark SQL，BigQuery ML等均引用了MADlib的工作，MADlib可以作为In-database分析的先驱者和领路人。
+4. UDA based AI algorithm的代表是Apache MADlib。MADlib于2011年诞生(背后论文发表于2009年VLDB),是由Pivotal Greenplum DB团队和高校联合研发的，参与的大学包括伯克利大学加州分校、斯坦福大学、威斯康辛麦迪逊大学、佛罗里达大学。2017年MADlib正式毕业成为Apache顶级项目。MADlib的思想源于论文“MAD skills: new analysis practices for big data”，目前Google引用已达555次，Spark SQL，BigQuery ML等均引用了MADlib的工作，MADlib被认为是In-database分析的先驱者和领路人。
 
 MADlib基于数据库User Defined Agrregation（UDA）实现机器学习算法，它完美的解决了In-databse分析的四个问题。
 易用性，MADlib通过将机器学习算法封装成数据库的UDF，用户可以使用标准SQL实现机器学习建模和推理，无需引入额外SQL语法，其用户接口如下：
@@ -73,8 +72,11 @@ ORDER BY p.id;
 ```
 
 本地性，MADlib的机器学习算法直接在DB的内核中执行。
-可扩展性，Greenplum DB是世界领先的开源MPP数据库，Greenplum与MADlib结合可以实现在DB的大量Segment结点上并行地执行聚集，生成sub state，并在Master结点进行sub state的聚合，从而实现机器学习算法从单结点到集群的扩展。
+
+可扩展性，Greenplum DB是世界领先的开源MPP数据库，Greenplum与MADlib结合可以实现在数据库的大量Segment结点上并行地执行聚集，生成sub state，并在Master结点进行sub state的聚合，从而实现机器学习算法从单结点到集群的扩展。
+
 通用性，MADlib目前支持50多种机器学习算法。除了核心的机器学习建模和推理，MADlib还支持了数据分析流水线的全部流程，实现了数据分析的闭环。数据科学家在定义好数据分析的问题后，首先进行数据探索，分析和识别数据中可供挖掘的模式，接下来进行数据的预处理、清洗和整合，之后才进行各种类型的建模，包括非监督的数据挖掘任务、有监督的预测建模、文本分析等等。最后还要对建模后的结果进行模型选择，不同的模型有不同的评测标准，往往还会使用交叉验证等技术。MADlib对以上环节都有支持。
+
 但包括MADlib在内的UDA based AI algorithm，需要假设模型能装入内存，因为它们将模型表达成UDA的state，对于拥有数百万、千万特征的模型，UDA based AI algorithm并不适合。
 
 综上，笔者从SQLFlow出发，分析了In-database分析领域不同的实现架构和代表产品，它们各自有适合的应用场景，但总体上都是奔着一个目标在努力：以最高效的方式将数据和机器学习连结在一起，让更多的技术人员可以使用AI，让AI可以赋能更多的企业。更可喜的是，我们看到从SQLFlow到Spark SQL再到Apache MADlib，它们都是开源软件的一份子，开源进一步促进了这些技术的普及和深入，让AI离我们再近一些。
