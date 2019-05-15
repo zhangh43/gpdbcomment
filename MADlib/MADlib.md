@@ -1,7 +1,7 @@
 # SQL与机器学习
 
 今年QCon大会，蚂蚁金服发布了开源SQLConnectAI产品SQLFlow，旨在“降低人工智能应用的技术门槛，让技术人员调用AI像SQL一样简单”。
-SQLFlow的思想最早可以追溯到2005年，当时Thomas Tileston提出了in-database分析，将数据库与数据挖掘、机器学习有机地统一了起来。
+SQLFlow的思想最早可以追溯到2005年，当时Thomas Tileston提出了In-database分析，将数据库与数据挖掘、机器学习有机地统一了起来。
 In-database分析通过扩充SQL的能力，降低了企业应用机器学习技术的门槛，同时解决了数据在不同系统间移动所产生的一系列问题。
 
 In-databse分析主要具有以下特性：
@@ -10,8 +10,7 @@ In-databse分析主要具有以下特性：
 3. 可扩展性，单机机器学习到集群机器学习的扩展
 4. 通用性，即支持的机器学习算法的丰富性。
 
-从2005年Thomas Tileston提出了in-database分析至今，已经涌现出很多In-database分析的产品，它们部分或全部支持In-database分析的特性，我们将
-主要的产品和时间线总结在图1.
+从2005年Thomas Tileston提出了In-database分析至今，已经涌现出很多In-database分析的产品，它们部分或全部支持In-database分析的特性，我们将主要的产品和时间线总结在图1.
 
 从时间线可以看出，2009年MAD Skills在VLDB的发表和2011年MADlib项目的诞生可以作为In-database分析的里程碑。MADlib是由Pivotal Greenplum DB团队和高校联合研发的，参与的大学包括伯克利大学加州分校、斯坦福大学、威斯康辛麦迪逊大学、佛罗里达大学。2017年MADlib正式毕业成为Apache顶级项目。MADlib的第一篇论文“MAD skills: new analysis practices for big data”，目前Google引用已达555次，Spark SQL，BigQuery ML等产品均引用了MADlib的工作，MADlib被认为是In-database分析的先驱者和领路人。
 
@@ -58,9 +57,7 @@ SELECT predicted_income FROM PREDICT(MODEL ‘income_model’,
 BigQuery ML很好的解决了In-database分析的前三个特性，但使用SQL编写复杂的机器学习算法虽然并非不可能，但开发效率也相对较低，截至目前，BigQuery ML只支持Linear regression，Logistic regression 和K-means clustering三类机器学习算法。
 
 
-4. UDA based AI algorithm的代表是Apache MADlib。MADlib于2011年诞生(背后论文发表于2009年VLDB),是由Pivotal Greenplum DB团队和高校联合研发的，参与的大学包括伯克利大学加州分校、斯坦福大学、威斯康辛麦迪逊大学、佛罗里达大学。2017年MADlib正式毕业成为Apache顶级项目。MADlib的思想源于论文“MAD skills: new analysis practices for big data”，目前Google引用已达555次，Spark SQL，BigQuery ML等均引用了MADlib的工作，MADlib被认为是In-database分析的先驱者和领路人。
-
-MADlib基于数据库User Defined Agrregation（UDA）实现机器学习算法，它完美的解决了In-databse分析的四个特性。
+4. UDA based AI algorithm的代表是Apache MADlib。MADlib基于数据库User Defined Agrregation（UDA）实现机器学习算法，它完美的解决了In-databse分析的四个特性。
 易用性，MADlib通过将机器学习算法封装成数据库的UDF，用户可以使用标准SQL实现机器学习建模和推理，无需引入额外SQL语法，其用户接口如下：
 ```
 SELECT madlib.logregr_train
